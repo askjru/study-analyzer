@@ -1,8 +1,11 @@
 import csv
 from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import math
+
 
 def load_study_data(filename):
     """Read the study data from a CSV file."""
@@ -211,36 +214,150 @@ def plot_weekly_progress(study_data, output_dir, weekly_goal=20):
     plt.savefig(output_dir / "weekly_study_progress.png")
     plt.close()
 
+def save_study_session(filename, session):
+    """Append a session without overwriting existing records."""
+    filename = Path(filename)
+    needs_header = not filename.exists() or filename.stat().st_size == 0
 
-if __name__ == "__main__":
-    filename = "study_data.csv"
-    study_data = load_study_data(filename)
+    # Ensure the new record starts on its own line.
+    needs_newline = False
+    if not needs_header:
+        with open(filename, "rb") as file:
+            file.seek(-1, 2)
+            needs_newline = file.read(1) not in (b"\n", b"\r")
+
+    with open(filename, "a", newline="", encoding="utf-8") as file:
+        if needs_newline:
+            file.write("\n")
+
+        writer = csv.DictWriter(file, fieldnames=["date", "course", "hours"])
+
+        if needs_header:
+            writer.writeheader()
+
+        writer.writerow(session)
+
+
+def add_study_session(filename):
+    """Ask for a study session, validate it, and save it."""
+    while True:
+        date_input = input(
+            "Date (YYYY-MM-DD, Enter for today): "
+        ).strip()
+
+        if not date_input:
+            session_date = date.today().isoformat()
+            break
+
+        try:
+            parsed_date = datetime.strptime(date_input, "%Y-%m-%d").date()
+
+            if parsed_date.isoformat() != date_input:
+                raise ValueError
+
+            session_date = parsed_date.isoformat()
+            break
+        except ValueError:
+            print("Enter a valid date using YYYY-MM-DD.")
+
+    while True:
+        course = input("Course: ").strip()
+
+        if course:
+            break
+
+        print("Course cannot be blank.")
+
+    while True:
+        try:
+            hours = float(input("Hours studied: ").strip())
+
+            if not math.isfinite(hours) or hours <= 0:
+                raise ValueError
+
+            break
+        except ValueError:
+            print("Enter a positive number, such as 1.5.")
+
+    session = {
+        "date": session_date,
+        "course": course,
+        "hours": hours,
+    }
+
+    try:
+        save_study_session(filename, session)
+    except OSError as error:
+        print(f"Could not save session: {error}")
+        return
+
+    print(f"\nSession saved: {session_date}, {course}, {hours:g} hours")
+
+
+def show_analytics(filename, chart_dir, weekly_goal=20):
+    """Read the latest CSV data and display analytics and charts."""
+    try:
+        study_data = load_study_data(filename)
+    except FileNotFoundError:
+        print("\nNo study data found. Add your first session!")
+        return
+
+    if not study_data:
+        print("\nNo study sessions recorded. Add your first session!")
+        return
 
     total_hours = calculate_total_hours(study_data)
-    print(f"Total study hours: {total_hours}")
+    print(f"\nTotal study hours: {total_hours:.2f}")
 
     course_hours = hours_per_course(study_data)
-    print("Study hours per course:")
+    print("\nStudy hours per course:")
+
     for course, hours in course_hours.items():
-        print(f"{course}: {hours} hours")
+        print(f"{course}: {hours:g} hours")
 
     most_studied, hours = most_studied_course(course_hours)
+
     if most_studied:
-        print(f"Most studied course: {most_studied} with {hours} hours")
-    else:
-        print("No courses found.")
+        print(f"\nMost studied course: {most_studied} with {hours:g} hours")
 
     average_hours = average_daily_hours(study_data)
     print(f"Average daily study hours: {average_hours:.2f}")
 
-    weekly_goal = 20
     print_weekly_summary(study_data, weekly_goal)
 
-    chart_dir = Path(__file__).resolve().parent / "charts"
     chart_dir.mkdir(exist_ok=True)
 
     plot_hours_per_course(study_data, chart_dir)
     plot_daily_hours(study_data, chart_dir)
     plot_weekly_progress(study_data, chart_dir, weekly_goal)
-    print("\nCharts saved successfully!")
+
+    print(f"\nCharts saved in: {chart_dir}")
+
+if __name__ == "__main__":
+    project_dir = Path(__file__).resolve().parent
+    filename = project_dir / "study_data.csv"
+    chart_dir = project_dir / "charts"
+    weekly_goal = 20
+
+    try:
+        while True:
+            print("\n===== STUDY ANALYZER =====")
+            print("1. View analytics and charts")
+            print("2. Add a study session")
+            print("3. Exit")
+
+            choice = input("\nChoose an option: ").strip()
+
+            if choice == "1":
+                show_analytics(filename, chart_dir, weekly_goal)
+            elif choice == "2":
+                add_study_session(filename)
+            elif choice == "3":
+                print("Goodbye!")
+                break
+            else:
+                print("Please choose 1, 2, or 3.")
+
+    except (KeyboardInterrupt, EOFError):
+        print("\nGoodbye!")
 
