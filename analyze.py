@@ -454,6 +454,116 @@ def delete_study_session(filename):
     print("\nSession deleted successfully!")
     return True
 
+def view_weekly_report(filename, chart_dir, weekly_goal=20):
+    """Let the user select a week and view its sessions and report."""
+    try:
+        study_data = load_study_data(filename)
+    except FileNotFoundError:
+        print("\nNo study data found. Add your first session!")
+        return
+
+    if not study_data:
+        print("\nNo study sessions recorded.")
+        return
+
+    # Group sessions by the Monday of their calendar week.
+    weekly_sessions = {}
+
+    for session in study_data:
+        session_date = date.fromisoformat(session["date"])
+        monday = session_date - timedelta(days=session_date.weekday())
+
+        if monday not in weekly_sessions:
+            weekly_sessions[monday] = []
+
+        weekly_sessions[monday].append(session)
+
+    weeks = sorted(weekly_sessions)
+
+    while True:
+        print("\n===== SELECT A WEEK =====")
+
+        for number, monday in enumerate(weeks, start=1):
+            sunday = monday + timedelta(days=6)
+            sessions = weekly_sessions[monday]
+            total_hours = calculate_total_hours(sessions)
+
+            print(
+                f"{number}. {monday} to {sunday} | "
+                f"{len(sessions)} sessions | {total_hours:.2f} hours"
+            )
+
+        choice = input(
+            "\nChoose a week number (Enter to return): "
+        ).strip()
+
+        if not choice:
+            return
+
+        try:
+            week_number = int(choice)
+
+            if not 1 <= week_number <= len(weeks):
+                raise ValueError
+
+        except ValueError:
+            print(f"Enter a number from 1 to {len(weeks)}.")
+            continue
+
+        monday = weeks[week_number - 1]
+        sunday = monday + timedelta(days=6)
+        sessions = sorted(
+            weekly_sessions[monday],
+            key=lambda session: session["date"],
+        )
+
+        print(f"\n===== REPORT: {monday} TO {sunday} =====")
+
+        # These numbers apply only to the displayed weekly list.
+        print("\nSessions in this week:")
+        print_study_sessions(sessions)
+
+        total_hours = calculate_total_hours(sessions)
+        course_hours = hours_per_course(sessions)
+        most_studied, hours = most_studied_course(course_hours)
+
+        print(f"\nTotal study hours: {total_hours:.2f}")
+        print(f"Study sessions: {len(sessions)}")
+
+        print("\nStudy hours per course:")
+        for course, course_total in course_hours.items():
+            print(f"{course}: {course_total:.2f} hours")
+
+        print(
+            f"\nMost studied course: "
+            f"{most_studied} with {hours:.2f} hours"
+        )
+
+        print(
+            "Average hours per recorded study day: "
+            f"{average_daily_hours(sessions):.2f}"
+        )
+
+        print(
+            "Average hours per calendar day in this week: "
+            f"{total_hours / 7:.2f}"
+        )
+
+        print_weekly_summary(sessions, weekly_goal)
+
+        # Give each week its own folder to preserve other reports.
+        week_chart_dir = (
+            Path(chart_dir) / "weekly_reports" / str(monday)
+        )
+        week_chart_dir.mkdir(parents=True, exist_ok=True)
+
+        plot_hours_per_course(sessions, week_chart_dir)
+        plot_daily_hours(sessions, week_chart_dir)
+        plot_weekly_progress(sessions, week_chart_dir, weekly_goal)
+
+        print(f"\nWeekly charts saved in: {week_chart_dir}")
+        input("\nPress Enter to choose another week...")
+
 if __name__ == "__main__":
     project_dir = Path(__file__).resolve().parent
     filename = project_dir / "study_data.csv"
@@ -467,7 +577,8 @@ if __name__ == "__main__":
             print("2. Add a study session")
             print("3. View saved sessions")
             print("4. Delete a study session")
-            print("5. Exit")
+            print("5. View a weekly report")
+            print("6. Exit")
 
             choice = input("\nChoose an option: ").strip()
 
@@ -495,11 +606,14 @@ if __name__ == "__main__":
                     show_analytics(filename, chart_dir, weekly_goal)
 
             elif choice == "5":
+                view_weekly_report(filename, chart_dir, weekly_goal)
+
+            elif choice == "6":
                 print("Goodbye!")
                 break
 
             else:
-                print("Please choose 1, 2, 3, 4, or 5.")
+                print("Please choose 1, 2, 3, 4, 5, or 6.")
 
     except (KeyboardInterrupt, EOFError):
         print("\nGoodbye!")
