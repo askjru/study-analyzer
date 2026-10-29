@@ -333,6 +333,127 @@ def show_analytics(filename, chart_dir, weekly_goal=20):
 
     print(f"\nCharts saved in: {chart_dir}")
 
+def print_study_sessions(study_data):
+    """Display saved sessions with numbers starting at 1."""
+    print(f"\n{'ID':<5} {'Date':<12} {'Course':<16} {'Hours'}")
+    print("-" * 45)
+
+    for session_id, session in enumerate(study_data, start=1):
+        print(
+            f"{session_id:<5} "
+            f"{session['date']:<12} "
+            f"{session['course']:<16} "
+            f"{session['hours']:g}"
+        )
+
+
+def view_study_sessions(filename):
+    """Read and display all saved sessions."""
+    try:
+        study_data = load_study_data(filename)
+    except FileNotFoundError:
+        print("\nNo study data found. Add your first session!")
+        return
+
+    if not study_data:
+        print("\nNo study sessions recorded.")
+        return
+
+    print_study_sessions(study_data)
+
+
+def delete_study_session(filename):
+    """Delete a selected session after confirmation."""
+    try:
+        study_data = load_study_data(filename)
+    except FileNotFoundError:
+        print("\nNo study data found.")
+        return False
+
+    if not study_data:
+        print("\nNo study sessions to delete.")
+        return False
+
+    print_study_sessions(study_data)
+
+    while True:
+        choice = input(
+            "\nSession ID to delete (Enter to cancel): "
+        ).strip()
+
+        if not choice:
+            print("Deletion cancelled.")
+            return False
+
+        try:
+            session_id = int(choice)
+
+            if not 1 <= session_id <= len(study_data):
+                raise ValueError
+
+            break
+        except ValueError:
+            print(f"Enter a number from 1 to {len(study_data)}.")
+
+    selected = study_data[session_id - 1]
+
+    print(
+        f"\nSelected: {selected['date']} | "
+        f"{selected['course']} | {selected['hours']:g} hours"
+    )
+
+    confirmation = input("Delete this session? (yes/no): ").strip().lower()
+
+    if confirmation != "yes":
+        print("Deletion cancelled.")
+        return False
+
+    remaining_sessions = [
+        session
+        for index, session in enumerate(study_data)
+        if index != session_id - 1
+    ]
+
+    # Write a temporary file first, then replace the CSV only after
+    # the complete updated data has been written successfully.
+    import os
+    import tempfile
+
+    filename = Path(filename)
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            dir=filename.parent,
+            prefix="study_sessions_",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temporary_path = Path(file.name)
+
+            writer = csv.DictWriter(
+                file,
+                fieldnames=["date", "course", "hours"],
+            )
+            writer.writeheader()
+            writer.writerows(remaining_sessions)
+
+        os.replace(temporary_path, filename)
+
+    except OSError as error:
+        print(f"Could not delete session: {error}")
+        return False
+
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+    print("\nSession deleted successfully!")
+    return True
+
 if __name__ == "__main__":
     project_dir = Path(__file__).resolve().parent
     filename = project_dir / "study_data.csv"
@@ -344,20 +465,41 @@ if __name__ == "__main__":
             print("\n===== STUDY ANALYZER =====")
             print("1. View analytics and charts")
             print("2. Add a study session")
-            print("3. Exit")
+            print("3. View saved sessions")
+            print("4. Delete a study session")
+            print("5. Exit")
 
             choice = input("\nChoose an option: ").strip()
 
             if choice == "1":
                 show_analytics(filename, chart_dir, weekly_goal)
+
             elif choice == "2":
                 add_study_session(filename)
+                show_analytics(filename, chart_dir, weekly_goal)
+
             elif choice == "3":
+                view_study_sessions(filename)
+
+            elif choice == "4":
+                if delete_study_session(filename):
+                    # Remove old charts so deleting the final session
+                    # cannot leave charts showing outdated data.
+                    for chart_name in (
+                        "hours_by_course.png",
+                        "daily_study_hours.png",
+                        "weekly_study_progress.png",
+                    ):
+                        (chart_dir / chart_name).unlink(missing_ok=True)
+
+                    show_analytics(filename, chart_dir, weekly_goal)
+
+            elif choice == "5":
                 print("Goodbye!")
                 break
+
             else:
-                print("Please choose 1, 2, or 3.")
+                print("Please choose 1, 2, 3, 4, or 5.")
 
     except (KeyboardInterrupt, EOFError):
         print("\nGoodbye!")
-
