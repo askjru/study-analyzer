@@ -1,10 +1,13 @@
 import csv
+import hashlib
+import json
 import math
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from datetime import date, timedelta
 
 from matplotlib.figure import Figure
@@ -13,7 +16,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import analyze
 
 ROOT = Path(__file__).resolve().parent
-DATA_FILE = ROOT / "study_data.csv"
+PROFILES_DIR = ROOT / "profiles"
 BG = "#101827"
 PANEL = "#1c293c"
 TEXT = "#edf3fc"
@@ -59,6 +62,51 @@ def save_sessions(filename, sessions):
             temporary.unlink(missing_ok=True)
 
 
+def profile_directory(name):
+    """Map a display name to a safe, unique directory under profiles/."""
+    key = hashlib.sha256(name.casefold().encode("utf-8")).hexdigest()
+    return PROFILES_DIR / key
+
+
+def list_profiles():
+    if not PROFILES_DIR.exists():
+        return []
+    names = []
+    for metadata in PROFILES_DIR.glob("*/profile.json"):
+        record = json.loads(metadata.read_text(encoding="utf-8"))
+        names.append(record["name"])
+    return sorted(names, key=str.casefold)
+
+
+def create_profile(name):
+    name = name.strip()
+    if not name or len(name) > 60 or any(ord(char) < 32 for char in name):
+        raise ValueError("Use a name between 1 and 60 characters, without control characters.")
+    folder = profile_directory(name)
+    folder.mkdir(parents=True, exist_ok=False)
+    try:
+        save_sessions(folder / "study_data.csv", [])
+        (folder / "profile.json").write_text(json.dumps({"name": name}), encoding="utf-8")
+    except Exception:
+        # Roll back only the files created for this new profile.
+        (folder / "study_data.csv").unlink(missing_ok=True)
+        (folder / "profile.json").unlink(missing_ok=True)
+        folder.rmdir()
+        raise
+    return name
+
+
+def delete_profile_data(name):
+    """Remove only the directory belonging to an existing named profile."""
+    folder = profile_directory(name)
+    if folder.is_symlink() or folder.resolve().parent != PROFILES_DIR.resolve():
+        raise ValueError("Invalid profile directory.")
+    metadata = json.loads((folder / "profile.json").read_text(encoding="utf-8"))
+    if metadata.get("name") != name:
+        raise ValueError("The profile changed. Refresh and select it again.")
+    shutil.rmtree(folder)
+
+
 def week_start(day):
     return day - timedelta(days=day.weekday())
 
@@ -67,14 +115,97 @@ class StudyDashboard(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Study Analyzer")
-        self.geometry("1180x850")
-        self.minsize(980, 760)
+        self.geometry("1180x800")
+        self.minsize(980, 720)
         self.configure(bg=BG)
         self.sessions = []
         self.week_map = {}
+        self.active_profile = None
+        self.data_file = None
         self.configure_styles()
         self.build_interface()
+        self.update_profile_choices()
+        self.render()
+
+    def update_profile_choices(self):
+        try:
+            self.profile_box["values"] = list_profiles()
+        except (OSError, ValueError, KeyError) as error:
+            messagebox.showerror("Could not read profiles", str(error))
+
+    def new_profile(self):
+        name = simpledialog.askstring("New profile", "Choose your profile name:", parent=self)
+        if name is None:
+            return
+        try:
+            name = create_profile(name)
+        except FileExistsError:
+            messagebox.showerror("Profile already exists", "Choose that profile from the list or enter a different name.")
+            return
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Could not create profile", str(error))
+            return
+        self.update_profile_choices()
+        self.profile.set(name)
+        self.switch_profile()
+
+    def delete_profile(self):
+        if not self.require_profile():
+            return
+        name = self.active_profile
+        if not messagebox.askyesno(
+            "Delete profile permanently?",
+            f"Delete profile '{name}' and ALL of its study sessions?\n\n"
+            "This cannot be undone. Other profiles will stay unchanged.",
+            default="no", parent=self,
+        ):
+            return
+        try:
+            delete_profile_data(name)
+        except (OSError, ValueError, KeyError) as error:
+            messagebox.showerror("Could not delete profile", str(error))
+            return
+        self.active_profile = None
+        self.data_file = None
+        self.profile.set("")
+        self.sessions = []
+        self.week_map = {}
+        self.period.set("All time")
+        self.period_box["values"] = ["All time"]
+        self.goal.set("20")
+        self.course.set("")
+        self.hours.set("")
+        self.day.set(date.today().isoformat())
+        self.update_profile_choices()
+        self.render()
+        self.status.config(text=f"Profile '{name}' deleted. Select or create a profile to continue.")
+
+    def switch_profile(self, event=None):
+        name = self.profile.get()
+        try:
+            if name not in list_profiles():
+                return
+            filename = profile_directory(name) / "study_data.csv"
+            sessions = load_sessions(filename)
+        except (OSError, ValueError, KeyError) as error:
+            self.profile.set(self.active_profile or "")
+            messagebox.showerror("Could not open profile", str(error))
+            return
+        self.active_profile = name
+        self.data_file = filename
+        self.sessions = sessions
+        self.period.set("All time")
+        self.goal.set("20")
+        self.day.set(date.today().isoformat())
+        self.course.set("")
+        self.hours.set("")
         self.refresh()
+
+    def require_profile(self):
+        if self.data_file is None:
+            messagebox.showinfo("Choose a profile", "Create a new profile or select yours from the list first.")
+            return False
+        return True
 
     def configure_styles(self):
         style = ttk.Style(self)
@@ -97,17 +228,31 @@ class StudyDashboard(tk.Tk):
         style.map("TNotebook.Tab", background=[("selected", "#365b78")])
 
     def build_interface(self):
-        outer = ttk.Frame(self, padding=24)
+        outer = ttk.Frame(self, padding=18)
         outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        # Only the charts/table row grows. Reserve space for all controls.
+        outer.rowconfigure(7, weight=1, minsize=120)
         header = ttk.Frame(outer)
-        header.pack(fill="x")
+        header.grid(row=0, column=0, sticky="ew")
         ttk.Label(header, text="Study Analyzer", style="Title.TLabel").pack(side="left")
         ttk.Button(header, text="Refresh", command=self.refresh).pack(side="right")
         ttk.Label(outer, text="Build your routine. See your progress.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(4, 18))
+                  style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 12))
+
+        profiles = ttk.Frame(outer)
+        profiles.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(profiles, text="Your profile").pack(side="left", padx=(0, 10))
+        self.profile = tk.StringVar()
+        self.profile_box = ttk.Combobox(profiles, textvariable=self.profile,
+                                        state="readonly", width=28)
+        self.profile_box.pack(side="left")
+        self.profile_box.bind("<<ComboboxSelected>>", self.switch_profile)
+        ttk.Button(profiles, text="+ New profile", command=self.new_profile).pack(side="left", padx=10)
+        ttk.Button(profiles, text="Delete profile", command=self.delete_profile).pack(side="left")
 
         filters = ttk.Frame(outer)
-        filters.pack(fill="x", pady=(0, 16))
+        filters.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         ttk.Label(filters, text="Report period").pack(side="left", padx=(0, 10))
         self.period = tk.StringVar(value="All time")
         self.period_box = ttk.Combobox(filters, textvariable=self.period,
@@ -120,7 +265,7 @@ class StudyDashboard(tk.Tk):
         ttk.Button(filters, text="Apply", command=self.render).pack(side="left", padx=8)
 
         cards = ttk.Frame(outer)
-        cards.pack(fill="x")
+        cards.grid(row=4, column=0, sticky="ew")
         self.metrics = []
         for index, label in enumerate(("STUDY HOURS", "SESSIONS", "TOP COURSE", "HOURS / STUDY DAY")):
             cards.columnconfigure(index, weight=1, uniform="card")
@@ -133,17 +278,17 @@ class StudyDashboard(tk.Tk):
             self.metrics.append(value)
 
         self.progress_text = ttk.Label(outer, style="Muted.TLabel")
-        self.progress_text.pack(anchor="w", pady=(15, 5))
+        self.progress_text.grid(row=5, column=0, sticky="w", pady=(10, 5))
         self.progress = ttk.Progressbar(outer, maximum=100)
-        self.progress.pack(fill="x", pady=(0, 15))
+        self.progress.grid(row=6, column=0, sticky="ew", pady=(0, 10))
 
         notebook = ttk.Notebook(outer)
-        notebook.pack(fill="both", expand=True)
+        notebook.grid(row=7, column=0, sticky="nsew")
         chart_tab = ttk.Frame(notebook)
         session_tab = ttk.Frame(notebook, padding=12)
         notebook.add(chart_tab, text="Overview & charts")
         notebook.add(session_tab, text="Study sessions")
-        self.figure = Figure(figsize=(10, 4), dpi=100, facecolor=BG)
+        self.figure = Figure(figsize=(10, 2.5), dpi=100, facecolor=BG)
         self.canvas = FigureCanvasTkAgg(self.figure, master=chart_tab)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
@@ -158,10 +303,15 @@ class StudyDashboard(tk.Tk):
         self.table.configure(yscrollcommand=scroll.set)
         self.table.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        ttk.Button(session_tab, text="Delete selected session", command=self.delete_session).pack(anchor="e", pady=(10, 0))
+        actions = ttk.Frame(session_tab)
+        actions.pack(fill="x", before=table_frame, pady=(0, 10))
+        ttk.Label(actions, text="Select a session below to delete it.",
+                  style="Muted.TLabel").pack(side="left")
+        ttk.Button(actions, text="Delete selected session",
+                   command=self.delete_session).pack(side="right")
 
         form = ttk.Frame(outer)
-        form.pack(fill="x", pady=(18, 0))
+        form.grid(row=8, column=0, sticky="ew", pady=(12, 0))
         self.day = tk.StringVar(value=date.today().isoformat())
         self.course = tk.StringVar()
         self.hours = tk.StringVar()
@@ -174,16 +324,21 @@ class StudyDashboard(tk.Tk):
             ttk.Entry(field, textvariable=variable, width=width).pack()
         ttk.Button(form, text="+ Add session", style="Accent.TButton",
                    command=self.add_session).grid(row=0, column=3, sticky="s")
-        self.status = ttk.Label(outer, text=f"Data: {DATA_FILE}", style="Muted.TLabel")
-        self.status.pack(anchor="w", pady=(12, 0))
+        self.status = ttk.Label(outer, text="Welcome! Create a profile or select yours above to begin.", style="Muted.TLabel")
+        self.status.grid(row=9, column=0, sticky="ew", pady=(8, 0))
+        outer.bind("<Configure>", lambda event: self.status.configure(
+            wraplength=max(200, event.width - 40)))
 
     def refresh(self):
+        if not self.require_profile():
+            return
         try:
-            sessions = load_sessions(DATA_FILE)
+            sessions = load_sessions(self.data_file)
         except (OSError, ValueError) as error:
             messagebox.showerror("Could not load data", str(error))
             return
         self.sessions = sessions
+        self.status.config(text=f"Profile: {self.active_profile} · Changes are saved automatically.")
         starts = sorted({week_start(date.fromisoformat(s["date"])) for s in sessions}, reverse=True)
         self.week_map = {f"{start} → {start + timedelta(days=6)}": start for start in starts}
         self.period_box["values"] = ["All time", *self.week_map]
@@ -265,6 +420,8 @@ class StudyDashboard(tk.Tk):
         self.canvas.draw_idle()
 
     def add_session(self):
+        if not self.require_profile():
+            return
         try:
             raw_day = self.day.get().strip()
             day = date.fromisoformat(raw_day)
@@ -275,9 +432,9 @@ class StudyDashboard(tk.Tk):
             if not course or not math.isfinite(hours) or hours <= 0:
                 raise ValueError("Enter a course and positive, finite study hours.")
             # Reload before editing so externally added records are preserved.
-            sessions = load_sessions(DATA_FILE)
+            sessions = load_sessions(self.data_file)
             sessions.append({"date": day.isoformat(), "course": course, "hours": hours})
-            save_sessions(DATA_FILE, sessions)
+            save_sessions(self.data_file, sessions)
         except (ValueError, OSError) as error:
             messagebox.showerror("Could not add session", str(error))
             return
@@ -291,22 +448,24 @@ class StudyDashboard(tk.Tk):
         self.status.config(text=f"Saved {course} · {hours:g} hours · {day}")
 
     def delete_session(self):
+        if not self.require_profile():
+            return
         selected = self.table.selection()
         if not selected:
             messagebox.showinfo("Select a session", "Select a row in Study sessions first.")
             return
         index = int(selected[0])
         session = self.sessions[index]
-        if not messagebox.askyesno("Delete session?", f"Delete {session['course']} on {session['date']} ({session['hours']:g} hours)?"):
+        if not messagebox.askyesno("Delete session?", f"Delete {session['course']} on {session['date']} ({session['hours']:g} hours)?", default="no", parent=self):
             return
         try:
-            current = load_sessions(DATA_FILE)
+            current = load_sessions(self.data_file)
             if current != self.sessions:
                 self.refresh()
                 messagebox.showinfo("Data changed", "Your CSV changed. Select the session again.")
                 return
             del current[index]
-            save_sessions(DATA_FILE, current)
+            save_sessions(self.data_file, current)
         except (OSError, ValueError) as error:
             messagebox.showerror("Could not delete session", str(error))
             return
